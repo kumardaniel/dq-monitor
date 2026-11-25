@@ -7,6 +7,7 @@ import logging
 
 import httpx
 
+from app.config import get_settings
 from app.database import SessionLocal
 from app.engine import runner
 from app.models import Alert
@@ -17,15 +18,25 @@ from app.worker.celery_app import celery_app
 logger = logging.getLogger(__name__)
 
 
-@celery_app.task(name="dq.run_checks")
-def run_checks(run_id: int) -> dict:
+@celery_app.task(name="dq.run_checks", bind=True, max_retries=get_settings().run_task_max_retries)
+def run_checks(self, run_id: int) -> dict:
+    """Execute a run. Rule-level problems are recorded as "error" results inside the run;
+    an exception reaching this level means infrastructure failed (e.g. the metadata DB),
+    so the task is retried with backoff, then dead-lettered if it keeps failing."""
     db = SessionLocal()
     try:
         notifications = runner.execute_run(db, run_id)
     except Exception as exc:
-        logger.exception("run failed", extra=log_extra(run_id=run_id))
-        runner.mark_run_failed(db, run_id, f"{type(exc).__name__}: {exc}")
-        raise
+        if self.request.retries < self.max_retries:
+            logger.warning(
+                "run failed, retrying",
+                extra=log_extra(run_id=run_id, attempt=self.request.retries + 1),
+            )
+            _safely(runner.requeue_run, db, run_id)
+            raise self.retry(exc=exc, countdown=5 * 2**self.request.retries) from exc
+        logger.exception("run failed permanently", extra=log_extra(run_id=run_id))
+        _safely(runner.mark_run_failed, db, run_id, f"{type(exc).__name__}: {exc}")
+        raise  # rejected -> RabbitMQ moves the message to the dead-letter queue
     finally:
         db.close()
     for n in notifications:
@@ -58,6 +69,14 @@ def send_alert_notification(alert_id: int, event: str) -> bool:
     except httpx.HTTPError:
         NOTIFICATIONS.labels("failed").inc()
         raise
+
+
+def _safely(fn, *args) -> None:
+    """Best-effort bookkeeping while handling a failure that may itself be a DB outage."""
+    try:
+        fn(*args)
+    except Exception:
+        logger.exception("could not update run state", extra=log_extra(fn=fn.__name__))
 
 
 @celery_app.task(name="dq.dispatch_scheduled_runs")

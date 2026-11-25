@@ -56,13 +56,13 @@ jobs:
       - run: alembic upgrade head
 
   e2e-docker:
-    # Boots the real stack (Postgres + Redis + API + Celery worker + beat), seeds the
+    # Boots the real stack (Postgres, Redis, RabbitMQ, API, worker, beat), seeds the
     # demo warehouse and checks that a run completes on a background worker.
     runs-on: ubuntu-latest
     needs: [lint, test]
     steps:
       - uses: actions/checkout@v4
-      - run: docker compose up --build -d postgres redis migrate api worker beat
+      - run: docker compose up --build -d postgres redis rabbitmq migrate api worker beat
       - name: Wait for API
         run: |
           for i in $(seq 1 60); do curl -sf localhost:8000/ready && exit 0; sleep 2; done
@@ -75,4 +75,6 @@ jobs:
           grep -q "Run 1: completed" out.txt
       - if: failure()
         run: docker compose logs
+      - name: Dead-letter queue exists
+        run: docker compose exec -T rabbitmq rabbitmqctl list_queues name | grep -q dq.dead
       - run: docker compose down -v

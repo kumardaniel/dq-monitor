@@ -4,7 +4,8 @@ This guide is for learning the project tool by tool. For each tool you get: what
 why this project uses it, the exact files to read, and an exercise to try.
 
 **Suggested order:** Python typing → FastAPI → Pydantic → SQLAlchemy → Alembic →
-PostgreSQL → pytest → Celery + Redis → Docker → Prometheus → GitHub Actions.
+PostgreSQL → JWT + bcrypt → pytest → Celery + RabbitMQ → Redis → Docker → Prometheus →
+GitHub Actions.
 
 ---
 
@@ -13,9 +14,10 @@ PostgreSQL → pytest → Celery + Redis → Docker → Prometheus → GitHub Ac
 requests, serialize responses, and generate OpenAPI/Swagger docs.
 **Why here:** Every client interaction (create rules, trigger runs, read alerts) is a REST call.
 **Read:**
-- `app/main.py`: the app factory, `include_router`, and router-level `dependencies=` (API-key auth on every `/api/v1` route).
+- `app/main.py`: the app factory, `include_router`, and router-level `dependencies=` (rate limiting and auth + role checks on every `/api/v1` router), plus exception handlers.
 - `app/api/routes/*.py`: endpoints. Note `status_code=201/202/204`, `response_model=`, and `HTTPException(404/409)`.
-- `app/api/deps.py`: **dependency injection**. `DB` gives each request a session, `Paging` parses `?limit&offset`, `require_api_key` does auth.
+- `app/api/deps.py`: **dependency injection**. `DB` gives each request a session, `Paging` parses `?limit&offset`, `get_current_user` turns a JWT into a `User`.
+- `app/api/errors.py`: **exception handlers** that give every error the same JSON shape.
 - `app/observability.py`: **middleware** (`RequestContextMiddleware`) that wraps every request.
 
 **Concepts to learn:** path vs. query params, dependency injection, `Annotated`,
@@ -83,34 +85,82 @@ transactions, `FOR UPDATE SKIP LOCKED`, `TIMESTAMPTZ`.
 **Exercise:** `docker compose exec postgres psql -U dq -d dq_monitor`, then run
 `EXPLAIN ANALYZE SELECT * FROM check_results WHERE rule_id = 1;`.
 
-## 6. Celery + Redis: background jobs
-**What:** Celery is a distributed task queue. Redis is the message broker that carries task
-messages from producers (API, beat) to workers.
-**Why here:** Checks can take seconds to minutes. The API shouldn't block, so it enqueues
-and returns `202`. Workers scale on their own, and beat provides cron scheduling.
+## 6. JWT + bcrypt: authentication
+**What:** bcrypt is a deliberately slow, salted password hash. A JWT (JSON Web Token) is a
+signed token, `header.payload.signature`, that proves who the caller is without a server-side session.
+**Why here:** Users log in once and send `Authorization: Bearer <token>` on every request.
+Viewers can read; editors can write.
 **Read:**
-- `app/worker/celery_app.py`: config. **Read the comments on `task_acks_late`** and the `beat_schedule`.
-- `app/worker/tasks.py`: three tasks, including `autoretry_for` + `retry_backoff` on notifications.
+- `app/security.py`: `hash_password`, `verify_password` (note the dummy hash used to
+  equalise timing), `create_access_token` (claims `sub`, `role`, `exp`, `iat`), and
+  `decode_access_token` (the **algorithm whitelist**).
+- `app/api/deps.py`: `OAuth2PasswordBearer`, `get_current_user` (re-loads the user on every
+  request), and `enforce_role_by_method` (one rule for a whole router).
+- `app/api/routes/auth.py`: the login (OAuth2 password flow), `/auth/me`, and user management.
+- `tests/test_auth.py`: expired, forged and `alg: none` tokens, a deactivated user, viewer
+  vs. editor, and login rate limiting.
+
+**Concepts:** authentication vs. authorization, 401 vs. 403, stateless tokens and why they
+can't be revoked, salting, work factors, user-enumeration attacks, and timing attacks.
+**Exercise:** Paste a token from `/auth/login` into https://jwt.io. The payload is readable
+(it is only *signed*, not encrypted), so never put secrets in it.
+
+## 7. Celery + RabbitMQ: background jobs and the dead-letter queue
+**What:** Celery is a distributed task queue. RabbitMQ is the message broker. It stores task
+messages durably until a worker acknowledges them.
+**Why here:** Checks can take seconds to minutes. The API publishes a job and returns `202`.
+Workers scale on their own, failures retry, and jobs that keep failing are parked in a
+dead-letter queue instead of vanishing.
+**Read:**
+- `app/worker/celery_app.py`: the **exchange → queue → worker** topology, the
+  `x-dead-letter-exchange` queue argument, and the comments on `task_acks_late` and
+  `task_acks_on_failure_or_timeout=False`.
+- `app/worker/tasks.py`: `run_checks` retries with backoff, re-queues the run row between
+  attempts, then raises, which dead-letters the message. Notifications use `autoretry_for`.
 - `app/engine/runner.py`: the **idempotency** check (`status != "queued"` → skip).
-- `app/services/scheduler.py`: how beat decides what's due (with `croniter`).
+- `app/api/routes/data_sources.py` (`trigger_run`): commit, then publish, plus the
+  broker-down → 503 path.
+- `scripts/dlq.py`: reads `dq.dead`, puts messages back (`list`), or republishes them (`replay`).
+- `tests/test_worker.py`: retries, recovery, duplicate delivery, and a broker outage.
 
-**Concepts:** producer/consumer, at-least-once delivery, idempotency, ack-late, retries with
-exponential backoff and jitter, eager mode for tests.
-**Exercise:** Run `make up`, then `docker compose logs -f worker`, trigger a run, and watch
-it move through the worker.
+**Concepts:** producer/consumer, exchanges and routing keys, ack/nack/reject, at-least-once
+delivery, idempotency, exponential backoff with jitter, dead-lettering, and poison messages.
+**Exercise:** Run `make up`, open http://localhost:15672 (guest/guest), and watch `dq.tasks`
+while you trigger runs. Then set `ALERT_WEBHOOK_URL=http://nowhere.invalid` and restart. Fail
+a rule, wait about a minute, and see the notifications arrive in `dq.dead`. Finally, run
+`docker compose exec worker python scripts/dlq.py list`.
 
-## 7. httpx: outgoing HTTP
+## 8. Redis: caching and rate limiting
+**What:** An in-memory key-value store with expiring keys and atomic counters.
+**Why here:** Status and dashboard reads are frequent, and computing them costs several
+aggregate queries. Redis serves repeats from memory and counts requests for rate limiting
+across all API replicas.
+**Read:**
+- `app/cache.py`: `get_or_set` (cache-aside), `invalidate_source`, `hit_rate_limit`
+  (`INCR` + `EXPIRE` in a pipeline), and the **fail-open** error handling.
+- Every `cache.invalidate_source(...)` call (`grep -rn invalidate_source app`). Note that each
+  one comes *after* `db.commit()`.
+- `tests/test_cache_and_errors.py`: hit, then miss after a write, Redis down, and rate limits.
+
+**Concepts:** cache-aside vs. write-through, invalidation vs. TTL, cache stampede, stale
+reads and the race behind them, and fixed-window vs. sliding-window rate limiting.
+**Exercise:** Run `redis-cli monitor` in one terminal. Call
+`GET /api/v1/data-sources/1/status` twice, then trigger a run, and watch the `GET`, `SET`
+and `DEL` commands go by.
+
+## 9. httpx: outgoing HTTP
 **What:** An HTTP client, a modern alternative to `requests`.
 **Why here:** Sends alert webhooks (`app/services/alerting.py::send_webhook`) and powers the
 demo script. Note the explicit `timeout`. Never make a network call without one.
 
-## 8. pytest: testing
+## 10. pytest: testing
 **What:** Python's standard test framework.
-**Why here:** 48 tests cover check logic, the API end to end, alerting, and scheduling, at
-93% coverage.
+**Why here:** 81 tests cover check logic, the API end to end, auth, caching, errors, the
+queue and scheduling, at 94% coverage.
 **Read:**
-- `tests/conftest.py`: **fixtures** (temp DBs, `TestClient`, factory fixture `make_rule`),
-  plus a seeded "warehouse" with exactly known defects.
+- `tests/conftest.py`: **fixtures** (temp DBs, `TestClient`s logged in as editor or viewer,
+  an in-memory **fakeredis**, the factory fixture `make_rule`), plus a seeded "warehouse"
+  with exactly known defects.
 - `tests/test_checks.py`: `@pytest.mark.parametrize` covering many invalid configs in one test.
 - `tests/test_api.py`: `unittest.mock.patch` fakes the webhook. `monkeypatch` changes settings.
 - `tests/test_scheduler.py`: time is passed in as `now=`, so tests are deterministic.
@@ -118,24 +168,25 @@ demo script. Note the explicit `timeout`. Never make a network call without one.
 **Commands:** `make test`, `pytest -k alert -v`, `pytest --cov --cov-report=html`.
 **Exercise:** Write a test for `PATCH /data-sources/{id}` with an invalid connection URL.
 
-## 9. Ruff: lint and format
+## 11. Ruff: lint and format
 **What:** A very fast linter and formatter that replaces flake8, isort and black.
 **Config:** `[tool.ruff]` in `pyproject.toml`. Run `make lint` / `make format`.
 
-## 10. Docker and Docker Compose: packaging and local infra
+## 12. Docker and Docker Compose: packaging and local infra
 **What:** Docker packages the app and its dependencies into an image. Compose runs a
 multi-container stack.
 **Read:**
 - `Dockerfile`: a **multi-stage build** (wheels built in stage 1, slim runtime in stage 2),
   **non-root user**, `HEALTHCHECK`.
-- `docker-compose.yml`: one image runs 4 roles (migrate, api, worker, beat). There are
+- `docker-compose.yml`: one image runs 4 roles (migrate, api, worker, beat), alongside
+  Postgres, RabbitMQ, Redis and Prometheus. There are
   `depends_on` health conditions, a one-shot `migrate` job, YAML anchors (`x-app: &app`), and volumes.
 
 **Exercise:** `docker compose up --build`, then `docker compose ps`, then
 `docker compose stop worker`. Trigger a run and see it stay `queued`. Start the worker
 again and watch it get processed.
 
-## 11. Prometheus: metrics
+## 13. Prometheus: metrics
 **What:** A time-series database that *scrapes* `/metrics` endpoints.
 **Read:** `app/observability.py` (Counter vs. Histogram, labels), `app/api/routes/health.py`
 (`/metrics`), and `deploy/prometheus.yml`.
@@ -143,30 +194,42 @@ again and watch it get processed.
 `sum by (status) (rate(dq_check_results_total[5m]))` and
 `histogram_quantile(0.95, rate(dq_http_request_duration_seconds_bucket[5m]))`.
 
-## 12. GitHub Actions: CI
+## 14. GitHub Actions: CI
 **What:** Runs workflows on every push and PR.
 **Read:** `.github/workflows/ci.yml`. It has four jobs:
 1. `lint` runs ruff.
 2. `test` runs pytest, with a coverage floor of 85%.
 3. `migrations-postgres` applies, rolls back and reapplies migrations against a real
    Postgres **service container**.
-4. `e2e-docker` boots the whole stack, seeds data, and checks that a run completes on a real worker.
+4. `e2e-docker` boots the whole stack (Postgres, RabbitMQ, Redis, API, worker, beat), logs
+   in, seeds data, checks that a run completes on a real worker, and checks that the
+   dead-letter queue exists.
 
 ---
 
 ## Interview cheat sheet: questions this project lets you answer
 
 - **"Walk me through a request."** Use the sequence diagram in `ARCHITECTURE.md` §2.
-- **"Why a queue instead of running checks in the API?"** Latency, isolation, independent
-  scaling, retries, and scheduling.
-- **"What if a worker dies mid-task?"** Ack-late redelivery plus an idempotent runner.
+- **"Why a queue instead of background tasks inside FastAPI?"** Background tasks die with the
+  API process and compete with requests. A broker persists jobs, scales workers on their own,
+  and gives retries and a dead-letter queue. (README, *Design decisions*.)
+- **"What if a worker dies mid-task?"** Ack-late redelivery plus an idempotent runner. If it
+  keeps failing: retries with backoff, then `dq.dead`, with the run marked `failed`.
+- **"How do you keep the cache consistent with the DB?"** Cache-aside: commit, then delete
+  the key, with a TTL as the backstop. Explain why the order matters and the race the TTL covers.
+- **"Why JWT, and what are its downsides?"** Stateless and easy to scale, but it can't be
+  revoked early. Short expiry plus a per-request user check covers that. Also mention
+  algorithm pinning and the secret-strength check.
+- **"401 vs. 403?"** 401: we don't know who you are. 403: we know, and you aren't allowed.
 - **"How do you prevent SQL injection when users define queries?"** Identifier allowlist
   regex, SQLAlchemy Core quoting, bound parameters, read-only transactions, and a read-only
   DB user.
 - **"How did you avoid alert fatigue?"** One active alert per rule, an occurrence counter,
   notifying only on open and resolve, and auto-resolve.
-- **"How do you scale this to 10k rules?"** Add workers, use per-source queues or routing,
-  pushdown keeps each check cheap, partition `check_results` by month, and add a retention job.
+- **"How would this scale to 10,000 datasets checked every hour?"** About 3 runs per second.
+  Add stateless workers, route per source so slow warehouses don't starve the others, jitter
+  the schedules, rely on pushdown to keep each check cheap, partition `check_results` and add
+  retention, and let the cache absorb dashboard reads.
 - **"How would you test time-dependent code?"** Inject `now` (see `dispatch_due_runs`).
 - **"What's N+1 and where did you avoid it?"** `selectinload` in `GET /runs/{id}`.
 - **"How do you change the schema safely?"** Alembic migrations, tested up, down and up again in CI.

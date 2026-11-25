@@ -1,5 +1,8 @@
 """Seed a demo data source + rules through the public API, then trigger a run.
 
+Logs in as an editor (default admin@example.com / admin-password; `make demo` and the
+Docker stack create that user for you).
+
 Local (SQLite, no Docker):
     python scripts/seed_demo.py
 Docker stack (monitors the Postgres "warehouse" DB from deploy/postgres-init):
@@ -72,14 +75,22 @@ def build_sqlite_warehouse(path: Path) -> str:
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--api", default="http://localhost:8000")
-    p.add_argument("--key", default="dev-api-key")
+    p.add_argument("--email", default="admin@example.com")
+    p.add_argument("--password", default="admin-password")
     p.add_argument("--source-type", default="sqlite")
     p.add_argument("--source-url", help="defaults to a freshly built ./demo_warehouse.db")
     p.add_argument("--name", default="demo-warehouse")
     args = p.parse_args()
 
     url = args.source_url or build_sqlite_warehouse(Path("demo_warehouse.db"))
-    api = httpx.Client(base_url=args.api, headers={"X-API-Key": args.key}, timeout=30)
+    api = httpx.Client(base_url=args.api, timeout=30)
+    login = api.post("/api/v1/auth/login", data={"username": args.email, "password": args.password})
+    if login.status_code != 200:
+        raise SystemExit(
+            f"Login failed ({login.status_code}). Create an editor first, e.g.\n"
+            f"  python -m app.cli create-user {args.email} --role editor"
+        )
+    api.headers["Authorization"] = f"Bearer {login.json()['access_token']}"
 
     resp = api.post(
         "/api/v1/data-sources",

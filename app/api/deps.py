@@ -1,29 +1,84 @@
-"""Shared FastAPI dependencies."""
+"""Shared FastAPI dependencies: database session, auth, roles, rate limiting, paging."""
 
-import secrets
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, Query, Security, status
-from fastapi.security import APIKeyHeader
+from fastapi import Depends, HTTPException, Query, Request, status
+from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
+from app import cache
 from app.config import get_settings
 from app.database import get_db
-
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
-
-
-def require_api_key(key: Annotated[str | None, Security(api_key_header)]) -> None:
-    # compare_digest takes the same time whether the key is right or wrong,
-    # so an attacker can't guess it byte by byte from response timings.
-    if not key or not secrets.compare_digest(key, get_settings().api_key):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing API key",
-        )
-
+from app.models import User
+from app.observability import RATE_LIMITED
+from app.security import TokenError, decode_access_token
 
 DB = Annotated[Session, Depends(get_db)]
+
+# tokenUrl makes Swagger's "Authorize" button show a username/password login form.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
+
+READ_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def _unauthorized(detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def get_current_user(token: Annotated[str | None, Depends(oauth2_scheme)], db: DB) -> User:
+    if not token:
+        raise _unauthorized("Not authenticated")
+    try:
+        user_id = decode_access_token(token)
+    except TokenError as exc:
+        raise _unauthorized(str(exc)) from None
+    # Re-load the user on every request: deactivation and role changes take effect
+    # immediately instead of when the (unrevocable) token expires.
+    user = db.get(User, user_id)
+    if user is None or not user.is_active:
+        raise _unauthorized("User not found or inactive")
+    return user
+
+
+CurrentUser = Annotated[User, Depends(get_current_user)]
+
+
+def require_editor(user: CurrentUser) -> User:
+    if user.role != "editor":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Editor role required")
+    return user
+
+
+def enforce_role_by_method(request: Request, user: CurrentUser) -> User:
+    """Router-wide rule: any authenticated user may read; only editors may write.
+
+    Applied once per router instead of on every endpoint, so a new write endpoint
+    can't accidentally ship without the editor check.
+    """
+    if request.method not in READ_METHODS:
+        require_editor(user)
+    return user
+
+
+def client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def rate_limit(request: Request) -> None:
+    retry_after = cache.hit_rate_limit(
+        f"ip:{client_ip(request)}", get_settings().rate_limit_per_minute
+    )
+    if retry_after is not None:
+        RATE_LIMITED.labels("api").inc()
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Rate limit exceeded",
+            headers={"Retry-After": str(retry_after)},
+        )
 
 
 class Pagination:

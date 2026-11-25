@@ -138,3 +138,14 @@ class Alert(TimestampMixin, Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     rule: Mapped[ValidationRule] = relationship(back_populates="alerts")
+
+
+class User(TimestampMixin, Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(254), unique=True, index=True)
+    # bcrypt hash (includes its own salt); the plain password is never stored.
+    hashed_password: Mapped[str] = mapped_column(String(100))
+    role: Mapped[str] = mapped_column(String(16), default="viewer")  # viewer | editor
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)

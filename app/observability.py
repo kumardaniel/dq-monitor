@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 import time
 import uuid
 from contextvars import ContextVar
@@ -33,6 +34,8 @@ CHECK_DURATION = Histogram(
 )
 RUNS = Counter("dq_runs_total", "Check runs by final status and trigger", ["status", "trigger"])
 ALERTS_OPENED = Counter("dq_alerts_opened_total", "Alerts opened", ["severity"])
+CACHE_REQUESTS = Counter("dq_cache_requests_total", "Read-cache lookups", ["result"])
+RATE_LIMITED = Counter("dq_rate_limited_total", "Requests rejected by the rate limiter", ["scope"])
 NOTIFICATIONS = Counter("dq_notifications_total", "Alert notifications sent", ["outcome"])
 
 
@@ -55,7 +58,9 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure_logging(level: str = "INFO") -> None:
-    handler = logging.StreamHandler()
+    # sys.__stderr__ (the real stream), not sys.stderr: Celery swaps sys.stderr for a
+    # proxy that feeds back into logging, which would swallow these lines in workers.
+    handler = logging.StreamHandler(sys.__stderr__)
     handler.setFormatter(JsonFormatter())
     root = logging.getLogger()
     root.handlers = [handler]

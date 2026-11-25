@@ -5,19 +5,15 @@ from unittest.mock import patch
 from app.config import get_settings
 
 
-def test_health_and_ready_need_no_auth(client):
-    assert client.get("/health", headers={"X-API-Key": ""}).json() == {"status": "ok"}
-    assert client.get("/ready").json()["database"] == "up"
+def test_health_and_ready_need_no_auth(anon_client):
+    assert anon_client.get("/health").json() == {"status": "ok"}
+    assert anon_client.get("/ready").json()["database"] == "up"
 
 
 def test_metrics_endpoint_exposes_prometheus_format(client):
     client.get("/health")
     body = client.get("/metrics").text
     assert "dq_http_requests_total" in body
-
-
-def test_api_requires_key(client):
-    assert client.get("/api/v1/data-sources", headers={"X-API-Key": "wrong"}).status_code == 401
 
 
 def test_request_id_header_is_returned(client):

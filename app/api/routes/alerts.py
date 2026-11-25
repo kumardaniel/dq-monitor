@@ -1,9 +1,9 @@
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
 from sqlalchemy import case, func, select
 
-from app import schemas
+from app import cache, schemas
 from app.api.deps import DB, Paging, get_or_404
 from app.models import Alert, CheckResult, CheckRun, DataSource, ValidationRule
 
@@ -38,6 +38,7 @@ def _transition(db, alert_id: int, allowed_from: tuple[str, ...], to: str) -> Al
         alert.resolved_at = now
     db.commit()
     db.refresh(alert)
+    cache.invalidate_source(alert.rule.data_source_id)
     return alert
 
 
@@ -52,7 +53,14 @@ def resolve_alert(alert_id: int, db: DB):
 
 
 @router.get("/dashboard/summary", response_model=schemas.SummaryOut)
-def summary(db: DB):
+def summary(db: DB, response: Response):
+    """Health overview. Cached in Redis (X-Cache header says HIT or MISS)."""
+    value, hit = cache.get_or_set(cache.SUMMARY_KEY, lambda: compute_summary(db))
+    response.headers["X-Cache"] = "HIT" if hit else "MISS"
+    return value
+
+
+def compute_summary(db) -> dict:
     """Aggregates computed in SQL (GROUP BY), not by loading rows into Python."""
     since = datetime.now(UTC) - timedelta(hours=24)
     active = Alert.status.in_(("open", "acknowledged"))

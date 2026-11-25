@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import cache
 from app.config import get_settings
 from app.engine.checks import CheckContext, CheckOutcome, get_check
 from app.engine.connectors import source_connection
@@ -67,6 +68,7 @@ def execute_run(db: Session, run_id: int) -> list[PendingNotification]:
     run.status = "running"
     run.started_at = datetime.now(UTC)
     db.commit()
+    cache.invalidate_source(run.data_source_id)
 
     source: DataSource = run.data_source
     rules = db.scalars(
@@ -106,6 +108,9 @@ def execute_run(db: Session, run_id: int) -> list[PendingNotification]:
     run.finished_at = datetime.now(UTC)
     run.status = "completed"
     db.commit()
+    # Invalidate AFTER commit: invalidating first would let a concurrent read re-cache
+    # the old state before the new state is visible.
+    cache.invalidate_source(source.id)
 
     RUNS.labels(run.status, run.trigger).inc()
     logger.info(
@@ -124,4 +129,15 @@ def mark_run_failed(db: Session, run_id: int, error: str) -> None:
     run.error_message = error[:2000]
     run.finished_at = datetime.now(UTC)
     db.commit()
+    cache.invalidate_source(run.data_source_id)
     RUNS.labels("failed", run.trigger).inc()
+
+
+def requeue_run(db: Session, run_id: int) -> None:
+    """Put a run back to "queued" so a retried task is allowed to execute it again."""
+    db.rollback()
+    run = db.get(CheckRun, run_id)
+    if run is not None and run.status == "running":
+        run.status = "queued"
+        run.started_at = None
+        db.commit()

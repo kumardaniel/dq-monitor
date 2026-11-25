@@ -5,6 +5,7 @@ configs) before anything touches the database. Response models control exactly w
 leaves the API, e.g. connection URLs are always returned with the password masked.
 """
 
+import re
 from datetime import datetime
 from typing import Any, Literal
 
@@ -202,3 +203,67 @@ class SummaryOut(BaseModel):
     results_last_24h: int
     pass_rate_last_24h: float | None
     sources: list[SourceHealth]
+
+
+# ---- Auth & users ----------------------------------------------------------
+Role = Literal["viewer", "editor"]
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _check_email(v: str) -> str:
+    v = v.strip().lower()
+    if not _EMAIL_RE.match(v) or len(v) > 254:
+        raise ValueError("Invalid email address")
+    return v
+
+
+def _check_password(v: str) -> str:
+    if len(v) < 8:
+        raise ValueError("Password must be at least 8 characters")
+    if len(v.encode()) > 72:  # bcrypt only uses the first 72 bytes
+        raise ValueError("Password must be at most 72 bytes")
+    return v
+
+
+class TokenOut(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+
+
+class UserCreate(BaseModel):
+    email: str
+    password: str
+    role: Role = "viewer"
+
+    _email = field_validator("email")(_check_email)
+    _password = field_validator("password")(_check_password)
+
+
+class UserUpdate(BaseModel):
+    role: Role | None = None
+    is_active: bool | None = None
+    password: str | None = None
+
+    @field_validator("password")
+    @classmethod
+    def _pw(cls, v: str | None) -> str | None:
+        return None if v is None else _check_password(v)
+
+
+class UserOut(ORMModel):
+    id: int
+    email: str
+    role: str
+    is_active: bool
+    created_at: datetime
+
+
+# ---- Cached status ---------------------------------------------------------
+class SourceStatusOut(BaseModel):
+    data_source_id: int
+    name: str
+    health: Literal["healthy", "failing", "unknown"]
+    last_run: RunOut | None
+    open_alerts: int
+    critical_open_alerts: int

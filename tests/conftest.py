@@ -16,15 +16,25 @@ from pathlib import Path
 
 _tmp = Path(tempfile.mkdtemp(prefix="dq-tests-"))
 os.environ["DATABASE_URL"] = f"sqlite:///{_tmp / 'meta.db'}"
-os.environ["API_KEY"] = "test-key"
+os.environ["ENVIRONMENT"] = "test"
 os.environ["CELERY_TASK_ALWAYS_EAGER"] = "true"
-os.environ.pop("ALERT_WEBHOOK_URL", None)
+os.environ["BCRYPT_ROUNDS"] = "4"  # the minimum: keeps the suite fast
+os.environ["RATE_LIMIT_PER_MINUTE"] = "10000"
+os.environ["LOGIN_RATE_LIMIT_PER_MINUTE"] = "10000"
+for var in ("ALERT_WEBHOOK_URL", "REDIS_URL", "BOOTSTRAP_EDITOR_EMAIL"):
+    os.environ.pop(var, None)
 
+import fakeredis  # noqa: E402
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+from app import cache  # noqa: E402
 from app.database import Base, SessionLocal, engine  # noqa: E402
 from app.main import app  # noqa: E402
+from app.models import User  # noqa: E402
+from app.security import create_access_token, hash_password  # noqa: E402
+
+PASSWORD = "correct-horse-battery"
 
 WAREHOUSE = _tmp / "warehouse.db"
 
@@ -86,9 +96,54 @@ def db():
     session.close()
 
 
+@pytest.fixture(autouse=True)
+def redis_client():
+    """An in-memory fake Redis, fresh for every test, so the cache path is exercised."""
+    fake = fakeredis.FakeRedis(decode_responses=True)
+    cache.set_client(fake)
+    yield fake
+    cache.set_client(None)
+
+
+def _make_user(email: str, role: str) -> User:
+    with SessionLocal() as s:
+        user = User(email=email, hashed_password=hash_password(PASSWORD), role=role)
+        s.add(user)
+        s.commit()
+        s.refresh(user)
+        return user
+
+
+def _auth(user: User) -> dict:
+    return {"Authorization": f"Bearer {create_access_token(user.id, user.role)[0]}"}
+
+
 @pytest.fixture
-def client() -> TestClient:
-    with TestClient(app, headers={"X-API-Key": "test-key"}) as c:
+def editor() -> User:
+    return _make_user("editor@example.com", "editor")
+
+
+@pytest.fixture
+def viewer() -> User:
+    return _make_user("viewer@example.com", "viewer")
+
+
+@pytest.fixture
+def anon_client() -> TestClient:
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.fixture
+def client(editor) -> TestClient:
+    """Authenticated as an editor (can read and write)."""
+    with TestClient(app, headers=_auth(editor)) as c:
+        yield c
+
+
+@pytest.fixture
+def viewer_client(viewer) -> TestClient:
+    with TestClient(app, headers=_auth(viewer)) as c:
         yield c
 
 

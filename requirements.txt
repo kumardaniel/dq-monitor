@@ -5,8 +5,11 @@ pydantic-settings==2.16.3
 SQLAlchemy==2.0.53
 alembic==1.20.1
 psycopg2-binary==2.9.13
-celery[redis]==5.7.0
+celery==5.7.0
 redis==8.1.0
 croniter==7.0.0
 httpx==0.28.1
 prometheus_client==0.26.0
+PyJWT==2.15.1
+bcrypt==5.0.0
+python-multipart==0.0.34

@@ -20,14 +20,31 @@ class Settings(BaseSettings):
     # Defaults to SQLite so the project runs with zero setup; docker-compose uses Postgres.
     database_url: str = "sqlite:///./dq_monitor.db"
 
-    # Simple shared-secret auth for the API (sent as the X-API-Key header).
-    api_key: str = "dev-api-key"
+    # JWT auth. The secret signs tokens: anyone holding it can mint valid tokens, so
+    # production must override it (the app refuses to start outside "local"/"test" if not).
+    jwt_secret: str = "dev-insecure-secret-change-me-before-deploying"
+    jwt_algorithm: str = "HS256"
+    access_token_minutes: int = 60
+    # bcrypt work factor: each +1 doubles hashing time. Tests lower it to stay fast.
+    bcrypt_rounds: int = 12
 
-    # Celery. When task_always_eager is true, tasks run inline in the API process,
-    # which means no Redis is needed for local development or tests.
-    celery_broker_url: str = "redis://localhost:6379/0"
-    celery_result_backend: str = "redis://localhost:6379/1"
+    # Optional first user, created at startup only if the users table is empty.
+    bootstrap_editor_email: str | None = None
+    bootstrap_editor_password: str | None = None
+
+    # Celery over RabbitMQ. When task_always_eager is true, tasks run inline in the API
+    # process, so no broker is needed for local development or tests.
+    celery_broker_url: str = "amqp://guest:guest@localhost:5672//"
     celery_task_always_eager: bool = True
+    # Retries for a run whose infrastructure failed (e.g. metadata DB briefly down)
+    # before the message is dead-lettered.
+    run_task_max_retries: int = 3
+
+    # Redis: read cache + rate limiting. Unset = both disabled (the app still works).
+    redis_url: str | None = None
+    cache_ttl_seconds: int = 60
+    rate_limit_per_minute: int = 120  # per client IP across /api/v1; 0 disables
+    login_rate_limit_per_minute: int = 10  # per IP + email, against password guessing
 
     # How often the scheduler looks for data sources whose cron schedule is due.
     scheduler_tick_seconds: int = 60

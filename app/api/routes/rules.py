@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, select
 
-from app import schemas
+from app import cache, schemas
 from app.api.deps import DB, Paging, get_or_404
 from app.engine.checks import CHECKS, CheckConfigError, validate_rule
 from app.models import CheckResult, DataSource, ValidationRule
@@ -24,6 +24,7 @@ def create_rule(payload: schemas.RuleCreate, db: DB):
     db.add(rule)
     db.commit()
     db.refresh(rule)
+    cache.invalidate_source(rule.data_source_id)
     return rule
 
 
@@ -60,13 +61,17 @@ def update_rule(rule_id: int, payload: schemas.RuleUpdate, db: DB):
         setattr(rule, key, value)
     db.commit()
     db.refresh(rule)
+    cache.invalidate_source(rule.data_source_id)
     return rule
 
 
 @router.delete("/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_rule(rule_id: int, db: DB):
-    db.delete(get_or_404(db, ValidationRule, rule_id))
+    rule = get_or_404(db, ValidationRule, rule_id)
+    source_id = rule.data_source_id
+    db.delete(rule)
     db.commit()
+    cache.invalidate_source(source_id)
 
 
 @router.get("/{rule_id}/results", response_model=schemas.Page[schemas.CheckResultOut])

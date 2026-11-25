@@ -14,6 +14,7 @@ from croniter import croniter
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import cache
 from app.models import CheckRun, DataSource
 
 IN_FLIGHT = ("queued", "running")
@@ -67,4 +68,6 @@ def dispatch_due_runs(db: Session, now: datetime | None = None) -> list[int]:
             continue
         run_ids.append(create_run(db, source, trigger="scheduled").id)
     db.commit()
+    for run_id in run_ids:
+        cache.invalidate_source(db.get(CheckRun, run_id).data_source_id)
     return run_ids

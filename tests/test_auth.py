@@ -140,6 +140,29 @@ def test_editor_manages_users(client, anon_client):
     assert client.get("/api/v1/users").json()["total"] == 2
 
 
+def test_register_creates_viewer_user(anon_client):
+    resp = anon_client.post(
+        "/api/v1/auth/register", json={"email": "self@example.com", "password": "longenough1"}
+    )
+    assert resp.status_code == 201
+    assert resp.json()["role"] == "viewer"
+    assert login(anon_client, "self@example.com", "longenough1").status_code == 200
+
+
+def test_register_duplicate_email_conflict(anon_client):
+    body = {"email": "dup@example.com", "password": "longenough1"}
+    assert anon_client.post("/api/v1/auth/register", json=body).status_code == 201
+    dup = anon_client.post("/api/v1/auth/register", json=body)
+    assert dup.status_code == 409
+
+
+def test_register_ignores_role_override(anon_client):
+    body = {"email": "sneaky@example.com", "password": "longenough1", "role": "editor"}
+    resp = anon_client.post("/api/v1/auth/register", json=body)
+    assert resp.status_code == 201
+    assert resp.json()["role"] == "viewer"
+
+
 def test_viewer_cannot_manage_users(viewer_client):
     assert viewer_client.get("/api/v1/users").status_code == 403
     body = {"email": "x@example.com", "password": "longenough1", "role": "editor"}

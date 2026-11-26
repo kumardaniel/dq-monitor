@@ -37,6 +37,9 @@ class DataSource(TimestampMixin, Base):
     last_scheduled_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    owner_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     validation_rules: Mapped[list["ValidationRule"]] = relationship(
         back_populates="data_source", cascade="all, delete-orphan"

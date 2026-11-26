@@ -35,6 +35,19 @@ def test_create_source_masks_password(client):
     assert resp.json()["connection_config"]["url"] == "postgresql://user:***@db:5432/x"
 
 
+def test_create_data_source_sets_owner_id(client, editor):
+    resp = client.post(
+        "/api/v1/data-sources",
+        json={
+            "name": "owned",
+            "source_type": "sqlite",
+            "connection_config": {"url": "sqlite://"},
+        },
+    )
+    assert resp.status_code == 201
+    assert resp.json()["owner_id"] == editor.id
+
+
 def test_source_validation(client):
     bad_type = {"name": "a", "source_type": "oracle", "connection_config": {"url": "x"}}
     assert client.post("/api/v1/data-sources", json=bad_type).status_code == 422

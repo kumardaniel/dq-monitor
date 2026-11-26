@@ -82,6 +82,7 @@ class DataSourceOut(ORMModel):
     is_active: bool
     last_scheduled_at: datetime | None
     created_at: datetime
+    owner_id: int | None
 
     @field_validator("connection_config")
     @classmethod

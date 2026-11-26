@@ -1,7 +1,8 @@
 # Resume entry
 
 **DQ Monitor: Data Quality Monitoring Service** · Python, FastAPI, PostgreSQL, SQLAlchemy,
-RabbitMQ, Celery, Redis, JWT, Docker, GitHub Actions · [github.com/&lt;you&gt;/dq-monitor](#)
+RabbitMQ, Celery, Redis, JWT, Docker, GitHub Actions ·
+[github.com/kumardaniel/dq-monitor](https://github.com/kumardaniel/dq-monitor)
 
 - Built a REST backend (FastAPI, SQLAlchemy 2.0, PostgreSQL, Alembic) that runs 8 types of
   data quality checks against external databases: null, uniqueness, range, regex, freshness,

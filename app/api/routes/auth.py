@@ -46,6 +46,25 @@ def login(request: Request, form: Annotated[OAuth2PasswordRequestForm, Depends()
     return {"access_token": token, "token_type": "bearer", "expires_in": expires_in}
 
 
+@router.post("/auth/register", response_model=schemas.UserOut, status_code=status.HTTP_201_CREATED)
+def register(payload: schemas.UserCreate, db: DB):
+    """Self-service signup. Always creates a viewer; promotion to editor requires an
+    existing editor via PATCH /users/{id}."""
+    user = User(
+        email=payload.email,
+        hashed_password=hash_password(payload.password),
+        role="viewer",
+    )
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered") from None
+    db.refresh(user)
+    return user
+
+
 @router.get("/auth/me", response_model=schemas.UserOut)
 def me(user: CurrentUser):
     return user

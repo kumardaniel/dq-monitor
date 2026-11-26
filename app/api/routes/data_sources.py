@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import cache, schemas
-from app.api.deps import DB, Paging, get_or_404
+from app.api.deps import DB, CurrentUser, Paging, get_or_404
 from app.config import get_settings
 from app.engine.connectors import ConnectionConfigError, test_connection, validate_connection
 from app.engine.runner import mark_run_failed
@@ -19,8 +19,8 @@ router = APIRouter(prefix="/data-sources", tags=["data sources"])
 
 
 @router.post("", response_model=schemas.DataSourceOut, status_code=status.HTTP_201_CREATED)
-def create_data_source(payload: schemas.DataSourceCreate, db: DB):
-    source = DataSource(**payload.model_dump())
+def create_data_source(payload: schemas.DataSourceCreate, db: DB, user: CurrentUser):
+    source = DataSource(**payload.model_dump(), owner_id=user.id)
     db.add(source)
     try:
         db.commit()
